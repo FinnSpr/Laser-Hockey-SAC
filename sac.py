@@ -59,7 +59,7 @@ class SAC(object):
 
     def update_parameters(self, memory, batch_size, updates):
         # Sample a batch from memory
-        state_batch, action_batch, reward_batch, next_state_batch, mask_batch = memory.sample(
+        state_batch, action_batch, reward_batch, next_state_batch, mask_batch, weights, tree_idxs = memory.sample(
             batch_size=batch_size)
 
         state_batch = torch.FloatTensor(state_batch).to(self.device)
@@ -68,6 +68,7 @@ class SAC(object):
         reward_batch = torch.FloatTensor(
             reward_batch).to(self.device).unsqueeze(1)
         mask_batch = torch.FloatTensor(mask_batch).to(self.device).unsqueeze(1)
+        is_weights = torch.FloatTensor(weights).to(self.device).unsqueeze(1)
 
         with torch.no_grad():
             next_state_action, next_state_log_pi, _ = self.policy.sample(
@@ -84,7 +85,8 @@ class SAC(object):
         qf1_loss = F.mse_loss(qf1, next_q_value)
         # JQ = 𝔼(st,at)~D[0.5(Q1(st,at) - r(st,at) - γ(𝔼st+1~p[V(st+1)]))^2]
         qf2_loss = F.mse_loss(qf2, next_q_value)
-        qf_loss = qf1_loss + qf2_loss
+        qf_loss = (qf1_loss + qf2_loss) * is_weights
+        qf_loss = qf_loss.mean()
 
         self.critic_optim.zero_grad()
         qf_loss.backward()
@@ -119,7 +121,12 @@ class SAC(object):
         if updates % self.target_update_interval == 0:
             soft_update(self.critic_target, self.critic, self.tau)
 
-        return qf1_loss.item(), qf2_loss.item(), policy_loss.item(), alpha_loss.item(), alpha_tlogs.item()
+        with torch.no_grad():
+            qf1_updated, qf2_updated = self.critic(state_batch, action_batch)
+            td_errors = torch.abs(reward_batch + mask_batch * self.gamma *
+                                  min_qf_next_target - torch.min(qf1_updated, qf2_updated))
+
+        return qf1_loss.item(), qf2_loss.item(), policy_loss.item(), alpha_loss.item(), alpha_tlogs.item(), td_errors, tree_idxs
 
     # Save model parameters
     def save_checkpoint(self, env_name, suffix="", ckpt_path=None):

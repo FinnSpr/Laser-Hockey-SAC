@@ -7,7 +7,7 @@ import itertools
 import torch
 from sac import SAC
 import pickle
-from replay_memory import ReplayMemory
+from per import PrioritizedReplayBuffer
 
 parser = argparse.ArgumentParser(description='PyTorch Soft Actor-Critic Args')
 parser.add_argument('--env-name', default="HalfCheetah-v2",
@@ -45,6 +45,10 @@ parser.add_argument('--target_update_interval', type=int, default=1, metavar='N'
                     help='Value target update per no. of updates per step (default: 1)')
 parser.add_argument('--replay_size', type=int, default=1000000, metavar='N',
                     help='size of replay buffer (default: 10000000)')
+parser.add_argument('--replay_alpha', type=float, default=0.1, metavar='N',
+                    help='determines how much prioritization is used, α = 0 corresponding to the uniform case (default: 0.1)')
+parser.add_argument('--replay_beta', type=float, default=0.1, metavar='N',
+                    help='ddetermines the amount of importance-sampling correction, b = 1 fully compensate for the non-uniform probabilities (default: 0.1)')
 parser.add_argument('--cuda', action="store_true",
                     help='run on CUDA (default: False)')
 args = parser.parse_args()
@@ -79,7 +83,7 @@ lengths_log = []
 
 
 def save_statistics():
-    with open(f"./stats/SAC_{args.env_name}-gamma{args.gamma}-tau{args.tau}-lr{args.lr}-alpha{args.alpha}-autotune{args.automatic_entropy_tuning}-seed{args.seed}-stat.pkl", 'wb') as f:
+    with open(f"./stats/SAC_{args.env_name}-gamma{args.gamma}-tau{args.tau}-lr{args.lr}-alpha{args.alpha}-autotune{args.automatic_entropy_tuning}-pera{args.replay_alpha}-perb{args.replay_beta}-seed{args.seed}-stat.pkl", 'wb') as f:
         pickle.dump({'critic_1_loss_log': critic_1_loss_log,
                      'critic_2_loss_log': critic_2_loss_log,
                      'policy_loss_log': policy_loss_log,
@@ -91,7 +95,8 @@ def save_statistics():
 
 
 # Memory
-memory = ReplayMemory(args.replay_size, args.seed)
+memory = PrioritizedReplayBuffer(
+    state_size=env.observation_space.shape[0], action_size=env.action_space.shape[0], buffer_size=args.replay_size, eps=1e-2, alpha=args.replay_alpha, beta=args.replay_beta)
 
 # Training Loop
 total_numsteps = 0
@@ -114,11 +119,11 @@ for i_episode in range(1, args.max_episodes+1):
         else:
             action = agent.select_action(state)  # Sample action from policy
 
-        if len(memory) > args.batch_size:
+        if memory.real_size > args.batch_size:
             # Number of updates per step in environment
             for i in range(args.updates_per_step):
                 # Update parameters of all the networks
-                critic_1_loss, critic_2_loss, policy_loss, ent_loss, alpha = agent.update_parameters(
+                critic_1_loss, critic_2_loss, policy_loss, ent_loss, alpha, td_errors, tree_idxs = agent.update_parameters(
                     memory, args.batch_size, updates)
 
                 critic_1_losses.append(critic_1_loss)
@@ -126,6 +131,7 @@ for i_episode in range(1, args.max_episodes+1):
                 policy_losses.append(policy_loss)
                 entropy_losses.append(ent_loss)
                 updates += 1
+                memory.update_priorities(tree_idxs, td_errors)
 
         next_state, reward, done, trunc, _ = env.step(action)  # Step
         episode_steps += 1
@@ -137,8 +143,8 @@ for i_episode in range(1, args.max_episodes+1):
         mask = 1 if episode_steps == env._max_episode_steps else float(
             not done)
 
-        memory.push(state, action, reward, next_state,
-                    mask)  # Append transition to memory
+        memory.add(state, action, reward, next_state,
+                   mask)  # Append transition to memory
 
         state = next_state
         if done or trunc:
@@ -188,7 +194,7 @@ for i_episode in range(1, args.max_episodes+1):
         if i_episode % 250 == 0:
             print("########## Saving a checkpoint... ##########")
             agent.save_checkpoint(
-                args.env_name, "", f"checkpoints/SAC_{args.env_name}_{i_episode}-gamma{args.gamma}-tau{args.tau}-lr{args.lr}-alpha{args.alpha}-autotune{args.automatic_entropy_tuning}-seed{args.seed}.pth")
+                args.env_name, "", f"checkpoints/SAC_{args.env_name}_{i_episode}-gamma{args.gamma}-tau{args.tau}-lr{args.lr}-alpha{args.alpha}-autotune{args.automatic_entropy_tuning}-pera{args.replay_alpha}-perb{args.replay_beta}-seed{args.seed}.pth")
             save_statistics()
 
 save_statistics()

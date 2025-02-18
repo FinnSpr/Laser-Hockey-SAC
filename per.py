@@ -1,7 +1,6 @@
 import torch
 import random
 import numpy as np
-import os
 
 
 # The ‘sum-tree’ data structure used here is very similar in spirit to the array representation

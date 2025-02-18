@@ -1,9 +1,6 @@
 import argparse
 import os
-import datetime
-import gymnasium as gym
 import numpy as np
-import itertools
 import torch
 from sac import SAC
 import pickle
@@ -11,13 +8,18 @@ from per import PrioritizedReplayBuffer
 import hockey.hockey_env as h_env
 
 OPP_CHOICES = ["basic_weak", "basic_strong", "shooting", "defending"]
-CHECKPOINT_INTERVAL = 250
-EVAL_INTERVAL = 10
+CHECKPOINT_INTERVAL = 500
+EVAL_INTERVAL = 100
 EVAL_EPS = 10
+
+# self-play
+MIXED_FREQ = 250
+ADVANCED_SELF_TRAIN = 100
+ADVANCED_BASIC = 50
 
 parser = argparse.ArgumentParser(
     description='PyTorch Soft Actor-Critic Laserhockey Args')
-parser.add_argument('--env-name', default="Hockey",
+parser.add_argument('--env_name', default="Hockey",
                     help='Gym environment (default: Hockey) -> code works only for hockey')
 parser.add_argument('--hockey_train_mode', default="basic_strong", choices=OPP_CHOICES,
                     help='For hockey env, determine the train mode')
@@ -40,8 +42,10 @@ parser.add_argument('--seed', type=int, default=123456, metavar='N',
                     help='random seed (default: 123456)')
 parser.add_argument('--batch_size', type=int, default=128, metavar='N',
                     help='batch size (default: 128)')
-parser.add_argument('--max_episodes', type=int, default=2000, metavar='N',
-                    help='number of episodes (default: 2000)')
+parser.add_argument('--max_episodes', type=int, default=10000, metavar='N',
+                    help='number of episodes (default: 10000)')
+parser.add_argument('--self_play', type=bool, default=True, metavar='G',
+                    help='Train on opponent and random previous agent version (default: True)')
 parser.add_argument('--max_timesteps', type=int, default=2000, metavar='N',
                     help='max timesteps in one episode (default: 2000)')
 parser.add_argument('--hidden_size', type=int, default=256, metavar='N',
@@ -79,12 +83,35 @@ np.random.seed(args.seed)
 # Agent
 agent = SAC(env.observation_space.shape[0], env.action_space, args)
 
-# Opponent
-opponent = None
-if args.hockey_train_mode == "basic_weak":
-    opponent = h_env.BasicOpponent(weak=True)
-elif args.hockey_train_mode == "basic_strong":
-    opponent = h_env.BasicOpponent(weak=False)
+
+def set_opponent(i_episode, basic=True, decay=0.7):
+    """
+    basic: Whether basic opponent should be loaded or previous trained SAC agent.
+    prob: Probability to choose the most recent agent checkpoint.
+    """
+    if basic:
+        print(
+            f"Loading {'strong' if args.hockey_train_mode == 'basic_strong' else 'weak'} basic opponent...")
+        if args.hockey_train_mode == "basic_weak":
+            return h_env.BasicOpponent(weak=True)
+        elif args.hockey_train_mode == "basic_strong":
+            return h_env.BasicOpponent(weak=False)
+        else:
+            raise RuntimeError("Invalid mode argument")
+
+    # weighted checkpoint selection (more recent ones more likely)
+    num_checkpoints = (i_episode - 1) // CHECKPOINT_INTERVAL
+    weights = np.exp(np.linspace(-num_checkpoints * decay, 0, num_checkpoints))
+    probabilities = weights / weights.sum()
+    selected_index = np.random.choice(
+        range(num_checkpoints), p=probabilities) + 1
+    selected_checkpoint_ep = selected_index * CHECKPOINT_INTERVAL
+    print(
+        f"Loading previous agent after {selected_checkpoint_ep} episodes as opponent...")
+    op = SAC(env.observation_space.shape[0], env.action_space, args)
+    op.load_checkpoint(
+        f"checkpoints/SAC_{args.env_name}_{selected_checkpoint_ep}-gamma{args.gamma}-tau{args.tau}-lr{args.lr}-alpha{args.alpha}-autotune{args.automatic_entropy_tuning}-pera{args.replay_alpha}-perb{args.replay_beta}-seed{args.seed}.pth", evaluate=True)
+
 
 # Hockey has no max episode steps
 env_has_max_steps = True
@@ -92,6 +119,15 @@ try:
     env._max_episode_steps
 except:
     env_has_max_steps = False
+
+# Self-play strategy:
+episodes_mixed = int(args.max_episodes * 0.4)
+episodes_advanced = int(args.max_episodes * 0.3)
+if args.self_play:
+    episodes_against_basic = int(args.max_episodes * 0.3)
+else:
+    # mixed and advanced never come
+    episodes_against_basic = args.max_episodes
 
 num_actions = env.action_space.shape[0] // 2
 
@@ -132,7 +168,23 @@ memory = PrioritizedReplayBuffer(
 total_numsteps = 0
 updates = 0
 
+opponent = set_opponent(0, basic=True)
+
 for i_episode in range(1, args.max_episodes+1):
+    if i_episode <= episodes_against_basic:
+        pass
+    elif i_episode <= episodes_mixed:
+        # switch every CHECKPOINT_INTERVAL steps
+        if (i_episode - 1 - episodes_against_basic) % (MIXED_FREQ * 2) == 0:
+            opponent = set_opponent(i_episode, basic=False)
+        elif (i_episode - 1 - episodes_against_basic) % (MIXED_FREQ * 2) == MIXED_FREQ:
+            opponent = set_opponent(i_episode, basic=True)
+    else:
+        if (i_episode - 1 - episodes_mixed - episodes_against_basic) % (ADVANCED_SELF_TRAIN + ADVANCED_BASIC) == 0:
+            opponent = set_opponent(i_episode, basic=False)
+        elif (i_episode - 1 - episodes_mixed - episodes_against_basic) % (ADVANCED_SELF_TRAIN + ADVANCED_BASIC) == ADVANCED_SELF_TRAIN:
+            opponent = set_opponent(i_episode, basic=True)
+
     episode_reward = 0
     episode_steps = 0
     critic_1_losses = []

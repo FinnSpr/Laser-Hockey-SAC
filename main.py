@@ -8,14 +8,23 @@ import torch
 from sac import SAC
 import pickle
 from per import PrioritizedReplayBuffer
+import hockey.hockey_env as h_env
 
-parser = argparse.ArgumentParser(description='PyTorch Soft Actor-Critic Args')
-parser.add_argument('--env-name', default="HalfCheetah-v2",
-                    help='Gym environment (default: HalfCheetah-v2)')
+OPP_CHOICES = ["basic_weak", "basic_strong", "shooting", "defending"]
+CHECKPOINT_INTERVAL = 250
+EVAL_INTERVAL = 10
+EVAL_EPS = 10
+
+parser = argparse.ArgumentParser(
+    description='PyTorch Soft Actor-Critic Laserhockey Args')
+parser.add_argument('--env-name', default="Hockey",
+                    help='Gym environment (default: Hockey) -> code works only for hockey')
+parser.add_argument('--hockey_train_mode', default="basic_strong", choices=OPP_CHOICES,
+                    help='For hockey env, determine the train mode')
 parser.add_argument('--policy', default="Gaussian",
                     help='Policy Type: Gaussian | Deterministic (default: Gaussian)')
 parser.add_argument('--eval', type=bool, default=True,
-                    help='Evaluates a policy every 50 episodes (default: True)')
+                    help=f'Evaluates a policy every {EVAL_INTERVAL} episodes (default: True)')
 parser.add_argument('--gamma', type=float, default=0.99, metavar='G',
                     help='discount factor for reward (default: 0.99)')
 parser.add_argument('--tau', type=float, default=0.005, metavar='G',
@@ -57,19 +66,34 @@ if not os.path.exists('stats/'):
     os.makedirs('stats/')
 
 # Environment
-# env = NormalizedActions(gym.make(args.env_name))
-if args.env_name == "LunarLander-v2":
-    env = gym.make(args.env_name, continuous=True)
+if args.hockey_train_mode == "shooting":
+    env = h_env.HockeyEnv(mode=h_env.Mode.TRAIN_SHOOTING)
+elif args.hockey_train_mode == "defending":
+    env = h_env.HockeyEnv(mode=h_env.Mode.TRAIN_DEFENSE)
 else:
-    env = gym.make(args.env_name)
-# env.seed(args.seed)
-# env.action_space.seed(args.seed)
+    env = h_env.HockeyEnv()
 
 torch.manual_seed(args.seed)
 np.random.seed(args.seed)
 
 # Agent
 agent = SAC(env.observation_space.shape[0], env.action_space, args)
+
+# Opponent
+opponent = None
+if args.hockey_train_mode == "basic_weak":
+    opponent = h_env.BasicOpponent(weak=True)
+elif args.hockey_train_mode == "basic_strong":
+    opponent = h_env.BasicOpponent(weak=False)
+
+# Hockey has no max episode steps
+env_has_max_steps = True
+try:
+    env._max_episode_steps
+except:
+    env_has_max_steps = False
+
+num_actions = env.action_space.shape[0] // 2
 
 # logging variables
 critic_1_loss_log = []
@@ -78,8 +102,11 @@ policy_loss_log = []
 entropy_loss_log = []
 alpha_log = []
 rewards_log = []
-average_rewards_log = []
+winner_log = []
 lengths_log = []
+eval_avg_log = []
+eval_winner_log = []
+eval_lengths_log = []
 
 
 def save_statistics():
@@ -90,20 +117,22 @@ def save_statistics():
                      'entropy_loss_log': entropy_loss_log,
                      'alpha_log': alpha_log,
                      'rewards_log': rewards_log,
-                     'average_rewards_log': average_rewards_log,
-                     'lengths_log': lengths_log}, f)
+                     'winner_log': winner_log,
+                     'lengths_log': lengths_log,
+                     'eval_avg_log': eval_avg_log,
+                     'eval_winner_log': eval_winner_log,
+                     'eval_lengths_log': eval_lengths_log}, f)
 
 
 # Memory
 memory = PrioritizedReplayBuffer(
-    state_size=env.observation_space.shape[0], action_size=env.action_space.shape[0], buffer_size=args.replay_size, eps=1e-2, alpha=args.replay_alpha, beta=args.replay_beta)
+    state_size=env.observation_space.shape[0], action_size=num_actions, buffer_size=args.replay_size, eps=1e-2, alpha=args.replay_alpha, beta=args.replay_beta)
 
 # Training Loop
 total_numsteps = 0
 updates = 0
 
 for i_episode in range(1, args.max_episodes+1):
-    print(i_episode)
     episode_reward = 0
     episode_steps = 0
     critic_1_losses = []
@@ -111,13 +140,17 @@ for i_episode in range(1, args.max_episodes+1):
     policy_losses = []
     entropy_losses = []
     done = False
-    state, _ = env.reset()
+    obs, info = env.reset()
+    obs_opponent = env.obs_agent_two()
 
     for t in range(args.max_timesteps):
         if args.start_steps > total_numsteps:
-            action = env.action_space.sample()  # Sample random action
+            agent_action = env.action_space.sample(
+            )[:num_actions]  # Sample random action
         else:
-            action = agent.select_action(state)  # Sample action from policy
+            agent_action = agent.select_action(
+                obs)  # Sample action from policy
+        opponent_action = opponent.act(obs_opponent)
 
         if memory.real_size > args.batch_size:
             # Number of updates per step in environment
@@ -133,65 +166,93 @@ for i_episode in range(1, args.max_episodes+1):
                 updates += 1
                 memory.update_priorities(tree_idxs, td_errors)
 
-        next_state, reward, done, trunc, _ = env.step(action)  # Step
+        next_obs, reward, done, trunc, info = env.step(
+            np.hstack([agent_action, opponent_action]))  # Step
         episode_steps += 1
         total_numsteps += 1
         episode_reward += reward
 
         # Ignore the "done" signal if it comes from hitting the time horizon.
         # (https://github.com/openai/spinningup/blob/master/spinup/algos/sac/sac.py)
-        mask = 1 if episode_steps == env._max_episode_steps else float(
+        mask = 1 if (env_has_max_steps and episode_steps == env._max_episode_steps) else float(
             not done)
 
-        memory.add(state, action, reward, next_state,
+        memory.add(obs, agent_action, reward, next_obs,
                    mask)  # Append transition to memory
 
-        state = next_state
+        obs = next_obs
+        obs_opponent = env.obs_agent_two()
+
         if done or trunc:
             break
 
     rewards_log.append(episode_reward)
-    lengths_log.append(t)
-    critic_1_loss_log.append(np.mean(critic_1_losses))
-    critic_2_loss_log.append(np.mean(critic_2_losses))
-    policy_loss_log.append(np.mean(policy_losses))
-    entropy_loss_log.append(np.mean(entropy_losses))
+    winner = info["winner"]
+    winner_log.append(winner)
+    lengths_log.append(t+1)
     try:
         alpha_log.append(alpha)
+        critic_1_loss_log.append(np.mean(critic_1_losses))
+        critic_2_loss_log.append(np.mean(critic_2_losses))
+        policy_loss_log.append(np.mean(policy_losses))
+        entropy_loss_log.append(np.mean(entropy_losses))
     except:
-        raise RuntimeError(
-            "Batch size is larger than episode length, try a smaller one!")
+        print("First episode: No updates, only transition collection.")
 
-    if i_episode % 50 == 0 and args.eval is True:
+    if winner == 1:
+        w = "W"
+    elif winner == 0:
+        w = "D"
+    else:
+        w = "L"
+
+    print(f"{i_episode} ({w})")
+
+    if i_episode % EVAL_INTERVAL == 0 and args.eval is True:
         avg_reward = 0.
-        episodes = 10
-        for _ in range(episodes):
-            state, _ = env.reset()
+        for _ in range(EVAL_EPS):
+            obs, info = env.reset()
+            obs_opponent = env.obs_agent_two()
             episode_reward = 0
             done = False
-            for _ in range(args.max_timesteps):
-                action = agent.select_action(state, evaluate=True)
-
-                next_state, reward, done, trunc, _ = env.step(action)
+            for t in range(args.max_timesteps):
+                agent_action = agent.select_action(obs, evaluate=True)
+                opponent_action = opponent.act(obs_opponent)
+                next_obs, reward, done, trunc, info = env.step(
+                    np.hstack([agent_action, opponent_action]))
                 episode_reward += reward
 
-                state = next_state
+                obs = next_obs
+                obs_opponent = env.obs_agent_two()
+
                 if done or trunc:
                     break
             avg_reward += episode_reward
-        avg_reward /= episodes
+            eval_winner_log.append(info["winner"])
+            eval_lengths_log.append(t+1)
+        avg_reward /= EVAL_EPS
 
-        average_rewards_log.append((avg_reward, i_episode))
+        eval_avg_log.append((avg_reward, i_episode))
 
         print("----------------------------------------")
+        print(f"Last {EVAL_INTERVAL} Episodes:")
         print(
-            f"Avg. Reward last 50 episodes: {round(np.mean(rewards_log[-50:]), 2)}")
-        print("Test Episodes: {}, Avg. Reward: {}".format(
-            episodes, round(avg_reward, 2)))
+            f"Avg. Reward: {round(np.mean(rewards_log[-EVAL_INTERVAL:]), 2)}")
+        print(
+            f"Wins: {sum(1 for x in winner_log[-EVAL_INTERVAL:] if x == 1)}, Draws: {sum(1 for x in winner_log[-EVAL_INTERVAL:] if x == 0)}, Losses: {sum(1 for x in winner_log[-EVAL_INTERVAL:] if x == -1)} ")
+        print(
+            f"Avg. Episode Length: {round(np.mean(lengths_log[-EVAL_INTERVAL:]), 2)}, Min: {np.min(lengths_log[-EVAL_INTERVAL:])}, Max: {np.max(lengths_log[-EVAL_INTERVAL:])}")
+        print("--------")
+        print(f"{EVAL_EPS} Test Episodes:")
+        print(f"Avg. Reward: {round(avg_reward, 2)}")
+        print(
+            f"Wins: {sum(1 for x in eval_winner_log[-EVAL_EPS:] if x == 1)}, Draws: {sum(1 for x in eval_winner_log[-EVAL_EPS:] if x == 0)}, Losses: {sum(1 for x in eval_winner_log[-EVAL_EPS:] if x == -1)} ")
+        print(
+            f"Avg. Episode Length: {round(np.mean(eval_lengths_log[-EVAL_EPS:]), 2)}, Min: {np.min(eval_lengths_log[-EVAL_EPS:])}, Max: {np.max(eval_lengths_log[-EVAL_EPS:])}")
         print("----------------------------------------")
 
-        # save every 250 episodes
-        if i_episode % 250 == 0:
+        # save every {CHECKPOINT_INTERVAL} episodes
+        if i_episode % CHECKPOINT_INTERVAL == 0:
             print("########## Saving a checkpoint... ##########")
             agent.save_checkpoint(
                 args.env_name, "", f"checkpoints/SAC_{args.env_name}_{i_episode}-gamma{args.gamma}-tau{args.tau}-lr{args.lr}-alpha{args.alpha}-autotune{args.automatic_entropy_tuning}-pera{args.replay_alpha}-perb{args.replay_beta}-seed{args.seed}.pth")

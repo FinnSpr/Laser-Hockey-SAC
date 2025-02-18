@@ -8,6 +8,8 @@ LOG_SIG_MIN = -20
 epsilon = 1e-6
 
 # Initialize Policy weights
+
+
 def weights_init_(m):
     if isinstance(m, nn.Linear):
         torch.nn.init.xavier_uniform_(m.weight, gain=1)
@@ -49,7 +51,7 @@ class QNetwork(nn.Module):
 
     def forward(self, state, action):
         xu = torch.cat([state, action], 1)
-        
+
         x1 = F.relu(self.linear1(xu))
         x1 = F.relu(self.linear2(x1))
         x1 = self.linear3(x1)
@@ -64,7 +66,7 @@ class QNetwork(nn.Module):
 class GaussianPolicy(nn.Module):
     def __init__(self, num_inputs, num_actions, hidden_dim, action_space=None):
         super(GaussianPolicy, self).__init__()
-        
+
         self.linear1 = nn.Linear(num_inputs, hidden_dim)
         self.linear2 = nn.Linear(hidden_dim, hidden_dim)
 
@@ -78,10 +80,11 @@ class GaussianPolicy(nn.Module):
             self.action_scale = torch.tensor(1.)
             self.action_bias = torch.tensor(0.)
         else:
+            half = action_space.shape[0] // 2
             self.action_scale = torch.FloatTensor(
-                (action_space.high - action_space.low) / 2.)
+                (action_space.high[:half] - action_space.low[:half]) / 2.)
             self.action_bias = torch.FloatTensor(
-                (action_space.high + action_space.low) / 2.)
+                (action_space.high[:half] + action_space.low[:half]) / 2.)
 
     def forward(self, state):
         x = F.relu(self.linear1(state))
@@ -127,10 +130,11 @@ class DeterministicPolicy(nn.Module):
             self.action_scale = 1.
             self.action_bias = 0.
         else:
+            half = action_space.shape[0] // 2
             self.action_scale = torch.FloatTensor(
-                (action_space.high - action_space.low) / 2.)
+                (action_space.high[:half] - action_space.low[:half]) / 2.)
             self.action_bias = torch.FloatTensor(
-                (action_space.high + action_space.low) / 2.)
+                (action_space.high[:half] + action_space.low[:half]) / 2.)
 
     def forward(self, state):
         x = F.relu(self.linear1(state))

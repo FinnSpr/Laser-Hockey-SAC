@@ -124,6 +124,7 @@ class HockeyEnv(gym.Env, EzPickle):
 
         self.timeStep = 1.0 / FPS
         self.time = 0
+        self.first_touch = True
         self.max_timesteps = None  # see reset
 
         self.closest_to_goal_dist = 1000
@@ -370,6 +371,7 @@ class HockeyEnv(gym.Env, EzPickle):
         self.winner = 0
         self.prev_shaping = None
         self.time = 0
+        self.first_touch = True
         if mode is not None and hasattr(Mode, self.mode):
             self.mode = mode
 
@@ -561,12 +563,14 @@ class HockeyEnv(gym.Env, EzPickle):
     # the shaping should probably be removed in future versions
     def get_reward(self, info):
         r = self._compute_reward()
-        r += info["reward_closeness_to_puck"]
+        r += info["reward_closeness_to_puck"] + \
+            info["reward_touch_puck"] + info["reward_puck_direction"]
         return float(r)
 
     def get_reward_agent_two(self, info_two):
         r = - self._compute_reward()
-        r += info_two["reward_closeness_to_puck"]
+        r += info_two["reward_closeness_to_puck"] + \
+            info_two["reward_touch_puck"] + info_two["reward_puck_direction"]
         return float(r)
 
     def _get_info(self):
@@ -581,10 +585,14 @@ class HockeyEnv(gym.Env, EzPickle):
             factor = max_reward / (max_dist * self.max_timesteps / 2)
             # Proxy reward for being close to puck in the own half
             reward_closeness_to_puck += dist_to_puck * factor
-        # Proxy reward: touch puck
+        # Proxy reward: touch puck (decays over time)
         reward_touch_puck = 0.
         if self.player1_has_puck == MAX_TIME_KEEP_PUCK:
-            reward_touch_puck = 1.
+            if self.first_touch:
+                reward_touch_puck = 3.0
+                self.first_touch = False
+            else:
+                reward_touch_puck = 0.99 ** self.time
 
         # puck is flying in the right direction
         max_reward = 1.

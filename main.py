@@ -98,10 +98,8 @@ parser.add_argument('--batch_size', type=int, default=128, metavar='N',
                     help='batch size (default: 128)')
 parser.add_argument('--max_episodes', type=int, default=15000, metavar='N',
                     help='number of episodes (default: 15000)')
-parser.add_argument('--self_play', type=bool, default=True, metavar='G',
-                    help='Train on opponent and random previous agent version (default: True)')
-parser.add_argument('--max_timesteps', type=int, default=2000, metavar='N',
-                    help='max timesteps in one episode (default: 2000)')
+parser.add_argument('--max_timesteps', type=int, default=1000, metavar='N',
+                    help='max timesteps in one episode (default: 1000)')
 parser.add_argument('--hidden_size', type=int, default=256, metavar='N',
                     help='hidden size (default: 256)')
 parser.add_argument('--updates_per_step', type=int, default=1, metavar='N',

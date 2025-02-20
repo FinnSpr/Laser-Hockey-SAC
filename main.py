@@ -7,23 +7,76 @@ import pickle
 from per import PrioritizedReplayBuffer
 import hockey.hockey_env as h_env
 
-OPP_CHOICES = ["basic_weak", "basic_strong", "shooting", "defending"]
-CHECKPOINT_INTERVAL = 1000
-EVAL_INTERVAL = 100
-EVAL_EPS = 10
-
 # self-play
-PHASE_PERCENTAGE = [0.3, 0.4, 0.3]  # basic, mixed, advanced
-MIXED_FREQ = 250
-ADVANCED_SELF_TRAIN = 100
-ADVANCED_BASIC = 50
+# 15000 episodes
+# 4000 basic (500 weak, 500 strong)
+# 7000 mixed (500 self-play, 200 strong, 500 self-play, 200 weak)
+# 4000 advanced (200 self-play, 200 self-play, 200 self-play, 100 strong, 100 weak)
+OPP_SWITCHES = {
+    0: "weak",
+    500: "strong",
+    1000: "weak",
+    1500: "strong",
+    2000: "weak",
+    2500: "strong",
+    3000: "weak",
+    3500: "strong",
+    4000: "self-play",
+    4500: "strong",
+    4700: "self-play",
+    5200: "weak",
+    5400: "self-play",
+    5900: "strong",
+    6100: "self-play",
+    6600: "weak",
+    6800: "self-play",
+    7300: "strong",
+    7500: "self-play",
+    8000: "weak",
+    8200: "self-play",
+    8700: "strong",
+    8900: "self-play",
+    9400: "weak",
+    9600: "self-play",
+    10100: "strong",
+    10300: "self-play",
+    10800: "weak",
+    11000: "self-play",
+    11200: "self-play",
+    11400: "self-play",
+    11600: "strong",
+    11700: "weak",
+    11800: "self-play",
+    12000: "self-play",
+    12200: "self-play",
+    12400: "strong",
+    12500: "weak",
+    12600: "self-play",
+    12800: "self-play",
+    13000: "self-play",
+    13200: "strong",
+    13300: "weak",
+    13400: "self-play",
+    13600: "self-play",
+    13800: "self-play",
+    14000: "strong",
+    14100: "weak",
+    14200: "self-play",
+    14400: "self-play",
+    14600: "self-play",
+    14800: "strong",
+    14900: "weak"
+}
+
+CHECKPOINT_INTERVAL = 1000
+EVAL_INTERVAL = 500
+EVAL_EPS = 50
+
 
 parser = argparse.ArgumentParser(
     description='PyTorch Soft Actor-Critic Laserhockey Args')
 parser.add_argument('--env_name', default="Hockey",
                     help='Gym environment (default: Hockey) -> code works only for hockey')
-parser.add_argument('--hockey_train_mode', default="basic_strong", choices=OPP_CHOICES,
-                    help='For hockey env, determine the train mode (default: basic_strong)')
 parser.add_argument('--policy', default="Gaussian",
                     help='Policy Type: Gaussian | Deterministic (default: Gaussian)')
 parser.add_argument('--eval', type=bool, default=True,
@@ -70,13 +123,7 @@ args = parser.parse_args()
 if not os.path.exists('stats/'):
     os.makedirs('stats/')
 
-# Environment
-if args.hockey_train_mode == "shooting":
-    env = h_env.HockeyEnv(mode=h_env.Mode.TRAIN_SHOOTING)
-elif args.hockey_train_mode == "defending":
-    env = h_env.HockeyEnv(mode=h_env.Mode.TRAIN_DEFENSE)
-else:
-    env = h_env.HockeyEnv()
+env = h_env.HockeyEnv()
 
 torch.manual_seed(args.seed)
 np.random.seed(args.seed)
@@ -85,22 +132,20 @@ np.random.seed(args.seed)
 agent = SAC(env.observation_space.shape[0], env.action_space, args)
 
 
-def set_opponent(i_episode, basic=True, decay=0.25):
+def set_opponent(i_episode, opp_type="strong", decay=0.25):
     """
     basic: Whether basic opponent should be loaded or previous trained SAC agent.
     prob: Probability to choose the most recent agent checkpoint.
 
     return: (opponent, basic?)
     """
-    if basic:
-        print(
-            f"Loading {'strong' if args.hockey_train_mode == 'basic_strong' else 'weak'} basic opponent...")
-        if args.hockey_train_mode == "basic_weak":
-            return h_env.BasicOpponent(weak=True), True
-        elif args.hockey_train_mode == "basic_strong":
-            return h_env.BasicOpponent(weak=False), True
-        else:
-            raise RuntimeError("Invalid mode argument")
+
+    if opp_type == "weak":
+        print(f"Loading {opp_type} basic opponent...")
+        return h_env.BasicOpponent(weak=True), True
+    if opp_type == "strong":
+        print(f"Loading {opp_type} basic opponent...")
+        return h_env.BasicOpponent(weak=False), True
 
     # weighted checkpoint selection (more recent ones more likely)
     num_checkpoints = (i_episode - 1) // CHECKPOINT_INTERVAL
@@ -123,15 +168,6 @@ try:
     env._max_episode_steps
 except:
     env_has_max_steps = False
-
-# Self-play strategy:
-episodes_mixed = int(args.max_episodes * PHASE_PERCENTAGE[1])
-episodes_advanced = int(args.max_episodes * PHASE_PERCENTAGE[2])
-if args.self_play:
-    episodes_against_basic = int(args.max_episodes * PHASE_PERCENTAGE[0])
-else:
-    # mixed and advanced never come
-    episodes_against_basic = args.max_episodes
 
 num_actions = env.action_space.shape[0] // 2
 
@@ -172,22 +208,12 @@ memory = PrioritizedReplayBuffer(
 total_numsteps = 0
 updates = 0
 
-opponent, currently_basic = set_opponent(0, basic=True)
+opponent, currently_basic = None, True
 
 for i_episode in range(1, args.max_episodes+1):
-    if i_episode <= episodes_against_basic:
-        pass
-    elif i_episode <= episodes_against_basic + episodes_mixed:
-        # switch every CHECKPOINT_INTERVAL steps
-        if (i_episode - 1 - episodes_against_basic) % (MIXED_FREQ * 2) == 0:
-            opponent, currently_basic = set_opponent(i_episode, basic=False)
-        elif (i_episode - 1 - episodes_against_basic) % (MIXED_FREQ * 2) == MIXED_FREQ:
-            opponent, currently_basic = set_opponent(i_episode, basic=True)
-    else:
-        if (i_episode - 1 - episodes_mixed - episodes_against_basic) % (ADVANCED_SELF_TRAIN + ADVANCED_BASIC) == 0:
-            opponent, currently_basic = set_opponent(i_episode, basic=False)
-        elif (i_episode - 1 - episodes_mixed - episodes_against_basic) % (ADVANCED_SELF_TRAIN + ADVANCED_BASIC) == ADVANCED_SELF_TRAIN:
-            opponent, currently_basic = set_opponent(i_episode, basic=True)
+    if (i_episode - 1) in OPP_SWITCHES:
+        opponent, currently_basic = set_opponent(
+            i_episode, OPP_SWITCHES[(i_episode-1)])
 
     episode_reward = 0
     episode_steps = 0
@@ -212,7 +238,7 @@ for i_episode in range(1, args.max_episodes+1):
                 obs_opponent)
         else:
             opponent_action = opponent.select_action(
-                obs_opponent, evaluate=True)
+                obs_opponent, evaluate=False)
 
         if memory.real_size > args.batch_size:
             # Number of updates per step in environment
@@ -272,19 +298,23 @@ for i_episode in range(1, args.max_episodes+1):
 
     if i_episode % EVAL_INTERVAL == 0 and args.eval is True:
         avg_reward = 0.
-        for _ in range(EVAL_EPS):
+
+        eval_opponent_weak = h_env.BasicOpponent(weak=True)
+        eval_opponent_strong = h_env.BasicOpponent(weak=False)
+
+        for ee in range(EVAL_EPS):
             obs, info = env.reset()
             obs_opponent = env.obs_agent_two()
             episode_reward = 0
             done = False
             for t in range(args.max_timesteps):
                 agent_action = agent.select_action(obs, evaluate=True)
-                if currently_basic:
-                    opponent_action = opponent.act(
+                if ee < (EVAL_EPS // 2):
+                    opponent_action = eval_opponent_weak.act(
                         obs_opponent)
                 else:
-                    opponent_action = opponent.select_action(
-                        obs_opponent, evaluate=True)
+                    opponent_action = eval_opponent_strong.act(
+                        obs_opponent)
                 next_obs, reward, done, trunc, info = env.step(
                     np.hstack([agent_action, opponent_action]))
                 episode_reward += reward

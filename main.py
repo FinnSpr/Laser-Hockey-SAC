@@ -118,6 +118,10 @@ parser.add_argument('--cuda', action="store_true",
                     help='run on CUDA (default: False)')
 args = parser.parse_args()
 
+if args.env_name != "Hockey":
+    raise RuntimeError(
+        "This code only works for the Hockey environment. For other environments, go to simple_envs/.")
+
 if not os.path.exists('stats/'):
     os.makedirs('stats/')
 

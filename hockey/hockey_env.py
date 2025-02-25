@@ -376,13 +376,14 @@ class HockeyEnv(gym.Env, EzPickle):
             self.mode = mode
 
         if self.mode == Mode.NORMAL:
-            self.max_timesteps = 100000  # 250
+            # I used 100000 for my training and controlled the max steps from main.py, but this setting affects the reward
+            self.max_timesteps = 250
             if one_starting is not None:
                 self.one_starts = one_starting
             else:
                 self.one_starts = not self.one_starts
         else:
-            self.max_timesteps = 100000  # 80
+            self.max_timesteps = 80
         self.closest_to_goal_dist = 1000
 
         W = VIEWPORT_W / SCALE

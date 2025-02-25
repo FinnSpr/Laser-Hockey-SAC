@@ -98,8 +98,8 @@ parser.add_argument('--batch_size', type=int, default=128, metavar='N',
                     help='batch size (default: 128)')
 parser.add_argument('--max_episodes', type=int, default=15000, metavar='N',
                     help='number of episodes (default: 15000)')
-parser.add_argument('--max_timesteps', type=int, default=1000, metavar='N',
-                    help='max timesteps in one episode (default: 1000)')
+parser.add_argument('--max_timesteps', type=int, default=250, metavar='N',
+                    help='Also controlled in hockey/hockey_env.py, please check this script first! Max timesteps in one episode (default: 250)')
 parser.add_argument('--hidden_size', type=int, default=256, metavar='N',
                     help='hidden size (default: 256)')
 parser.add_argument('--updates_per_step', type=int, default=1, metavar='N',
